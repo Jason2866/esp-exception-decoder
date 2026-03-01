@@ -1,5 +1,3 @@
-import path from 'node:path'
-
 import { FQBN } from 'fqbn'
 import {
   createDecodeParams as trbrCreateDecodeParams,

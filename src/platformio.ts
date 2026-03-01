@@ -26,7 +26,9 @@ export interface PioProject {
 }
 
 /** Minimal INI parser for platformio.ini */
-function parsePlatformioIni(content: string): Record<string, Record<string, string>> {
+function parsePlatformioIni(
+  content: string
+): Record<string, Record<string, string>> {
   const sections: Record<string, Record<string, string>> = {}
   let currentSection: string | undefined
   const lines = content.split(/\r?\n/)
@@ -108,8 +110,8 @@ const mcuToTargetArch: Record<string, TrbrTargetArch> = {
 }
 
 /**
- * Known board → MCU mappings for common ESP32 boards.
- * Used as fallback if board JSON cannot be found.
+ * Known board → MCU mappings for common ESP32 boards. Used as fallback if board
+ * JSON cannot be found.
  */
 const knownBoardMcu: Record<string, string> = {
   esp32dev: 'esp32',
@@ -123,18 +125,18 @@ const knownBoardMcu: Record<string, string> = {
   featheresp32: 'esp32',
   esp32_s2_saola: 'esp32s2',
   esp32s2box: 'esp32s2',
-  'lolin_s2_mini': 'esp32s2',
+  lolin_s2_mini: 'esp32s2',
   'esp32-s2-kaluga-1': 'esp32s2',
   'esp32-s2-saola-1': 'esp32s2',
   'esp32-s3-devkitc-1': 'esp32s3',
   'esp32-s3-devkitm-1': 'esp32s3',
   esp32s3box: 'esp32s3',
   esp32s3camlcd: 'esp32s3',
-  'lolin_s3': 'esp32s3',
+  lolin_s3: 'esp32s3',
   esp32_c3_devkitm: 'esp32c3',
   'esp32-c3-devkitc-02': 'esp32c3',
   'esp32-c3-devkitm-1': 'esp32c3',
-  'lolin_c3_mini': 'esp32c3',
+  lolin_c3_mini: 'esp32c3',
   'esp32-c6-devkitc-1': 'esp32c6',
   'esp32-c6-devkitm-1': 'esp32c6',
   'esp32-h2-devkitm-1': 'esp32h2',
@@ -175,7 +177,10 @@ async function tryReadBoardJson(
 function platformioHomePath(): string {
   return (
     process.env['PLATFORMIO_HOME_DIR'] ??
-    path.join(process.env['HOME'] ?? process.env['USERPROFILE'] ?? '~', '.platformio')
+    path.join(
+      process.env['HOME'] ?? process.env['USERPROFILE'] ?? '~',
+      '.platformio'
+    )
   )
 }
 
@@ -184,9 +189,12 @@ function platformioPackagesPath(): string {
 }
 
 /**
- * Find the PlatformIO platform package directory for espressif32 or espressif8266.
+ * Find the PlatformIO platform package directory for espressif32 or
+ * espressif8266.
  */
-async function findPlatformPackagePaths(platformName: string): Promise<string[]> {
+async function findPlatformPackagePaths(
+  platformName: string
+): Promise<string[]> {
   const packagesDir = platformioPackagesPath()
   const candidates: string[] = []
   try {
@@ -340,7 +348,10 @@ export async function resolveBoardArch(
   if (platformName.includes('espressif32') || platformName.includes('esp32')) {
     return 'xtensa' // default for ESP32
   }
-  if (platformName.includes('espressif8266') || platformName.includes('esp8266')) {
+  if (
+    platformName.includes('espressif8266') ||
+    platformName.includes('esp8266')
+  ) {
     return 'xtensa'
   }
 
@@ -402,10 +413,12 @@ export async function resolveEnvironment(
 }
 
 /**
- * Picks a PlatformIO environment. If only one exists, uses that;
- * otherwise shows a quick pick.
+ * Picks a PlatformIO environment. If only one exists, uses that; otherwise
+ * shows a quick pick.
  */
-export async function pickPioEnvironment(): Promise<PioResolvedEnv | undefined> {
+export async function pickPioEnvironment(): Promise<
+  PioResolvedEnv | undefined
+> {
   const projects = await findPioProjects()
   if (projects.length === 0) {
     return undefined
@@ -448,8 +461,8 @@ export async function pickPioEnvironment(): Promise<PioResolvedEnv | undefined> 
 // ---------------------------------------------------------------------------
 
 /**
- * Creates a synthetic Arduino FQBN from PlatformIO board/MCU info.
- * The FQBN is used by the existing decode infrastructure.
+ * Creates a synthetic Arduino FQBN from PlatformIO board/MCU info. The FQBN is
+ * used by the existing decode infrastructure.
  */
 export function syntheticFqbn(mcu: string): string {
   const normalizedMcu = mcu.toLowerCase().replace(/-/g, '')

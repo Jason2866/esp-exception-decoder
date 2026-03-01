@@ -115,7 +115,6 @@
     "webpack": "^5.81.0",
     "webpack-cli": "^5.0.2"
   },
-
   "engines": {
     "vscode": "^1.78.0"
   },
