@@ -1,7 +1,7 @@
 {
   "name": "esp-exception-decoder",
   "displayName": "ESP Exception Decoder",
-  "version": "2.1.1",
+  "version": "2.2.0",
   "private": true,
   "description": "ESP Exception Decoder for PlatformIO (pioarduino) — decode ESP32/ESP8266 crash stack traces, backtraces, and panic output in VS Code.",
   "categories": [
@@ -117,6 +117,10 @@
   },
   "engines": {
     "vscode": "^1.78.0"
+  },
+  "overrides": {
+    "diff": "^8.0.0",
+    "serialize-javascript": "^7.0.3"
   },
   "icon": "resources/images/esp-exception-decoder_icon.png",
   "galleryBanner": {
