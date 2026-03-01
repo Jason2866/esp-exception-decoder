@@ -25,31 +25,41 @@ export interface PioProject {
   environments: PioEnvironment[]
 }
 
-/** Minimal INI parser for platformio.ini */
+/** Minimal INI parser for platformio.ini (handles multi-line values) */
 function parsePlatformioIni(
   content: string
 ): Record<string, Record<string, string>> {
   const sections: Record<string, Record<string, string>> = {}
   let currentSection: string | undefined
+  let lastKey: string | undefined
   const lines = content.split(/\r?\n/)
 
   for (const rawLine of lines) {
-    const line = rawLine.trim()
-    if (!line || line.startsWith('#') || line.startsWith(';')) {
+    const trimmed = rawLine.trim()
+    if (!trimmed || trimmed.startsWith('#') || trimmed.startsWith(';')) {
       continue
     }
-    const sectionMatch = line.match(/^\[(.+)\]$/)
+    const sectionMatch = trimmed.match(/^\[(.+)\]$/)
     if (sectionMatch) {
       currentSection = sectionMatch[1].trim()
       sections[currentSection] = sections[currentSection] ?? {}
+      lastKey = undefined
       continue
     }
     if (currentSection) {
-      const kvMatch = line.match(/^([^=]+)=(.*)$/)
+      // Continuation line: starts with whitespace and no '=' before content
+      // (or has '=' but the raw line starts with whitespace, indicating
+      // it's a continuation of a multi-line value like build_flags)
+      if (lastKey && /^\s/.test(rawLine) && !/^\S/.test(rawLine)) {
+        sections[currentSection][lastKey] += '\n' + trimmed
+        continue
+      }
+      const kvMatch = trimmed.match(/^([^=]+)=(.*)$/)
       if (kvMatch) {
         const key = kvMatch[1].trim()
         const value = kvMatch[2].trim()
         sections[currentSection][key] = value
+        lastKey = key
       }
     }
   }
@@ -59,14 +69,22 @@ function parsePlatformioIni(
 function parseEnvironments(
   sections: Record<string, Record<string, string>>
 ): PioEnvironment[] {
+  // The [env] section (without a name) provides defaults inherited by all
+  // named [env:xxx] sections.
+  const baseEnv = sections['env'] ?? {}
   const envs: PioEnvironment[] = []
+  let hasNamedEnvs = false
+
   for (const [sectionName, props] of Object.entries(sections)) {
     if (!sectionName.startsWith('env:')) {
       continue
     }
+    hasNamedEnvs = true
     const envName = sectionName.slice(4)
-    const platform = props['platform'] ?? ''
-    const board = props['board'] ?? ''
+    // Merge: named env props override base [env] props
+    const merged = { ...baseEnv, ...props }
+    const platform = merged['platform'] ?? ''
+    const board = merged['board'] ?? ''
     if (!board) {
       continue
     }
@@ -74,13 +92,29 @@ function parseEnvironments(
       name: envName,
       platform,
       board,
-      framework: props['framework'],
-      monitorSpeed: props['monitor_speed']
-        ? parseInt(props['monitor_speed'], 10)
+      framework: merged['framework'],
+      monitorSpeed: merged['monitor_speed']
+        ? parseInt(merged['monitor_speed'], 10)
         : undefined,
-      buildFlags: props['build_flags'],
+      buildFlags: merged['build_flags'],
     })
   }
+
+  // If there are no named [env:xxx] sections but [env] defines a board,
+  // treat it as a single default environment.
+  if (!hasNamedEnvs && baseEnv['board']) {
+    envs.push({
+      name: 'default',
+      platform: baseEnv['platform'] ?? '',
+      board: baseEnv['board'],
+      framework: baseEnv['framework'],
+      monitorSpeed: baseEnv['monitor_speed']
+        ? parseInt(baseEnv['monitor_speed'], 10)
+        : undefined,
+      buildFlags: baseEnv['build_flags'],
+    })
+  }
+
   return envs
 }
 
