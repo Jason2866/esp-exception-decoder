@@ -6,6 +6,8 @@ import vscode from 'vscode'
 
 const pioDebug = debug('espExceptionDecoder:platformio')
 
+type Sections = Record<string, Record<string, string>>
+
 // ---------------------------------------------------------------------------
 // PlatformIO INI parsing
 // ---------------------------------------------------------------------------
@@ -26,10 +28,8 @@ export interface PioProject {
 }
 
 /** Minimal INI parser for platformio.ini (handles multi-line values) */
-function parsePlatformioIni(
-  content: string
-): Record<string, Record<string, string>> {
-  const sections: Record<string, Record<string, string>> = {}
+function parsePlatformioIni(content: string): Sections {
+  const sections: Sections = {}
   let currentSection: string | undefined
   let lastKey: string | undefined
   const lines = content.split(/\r?\n/)
@@ -66,13 +66,160 @@ function parsePlatformioIni(
   return sections
 }
 
+// ---------------------------------------------------------------------------
+// extra_configs handling
+// ---------------------------------------------------------------------------
+
+/**
+ * Merge `source` sections into `target`. Keys in `source` override those in
+ * `target` when both define the same key within the same section.
+ */
+function mergeSections(target: Sections, source: Sections): void {
+  for (const [sectionName, props] of Object.entries(source)) {
+    if (!target[sectionName]) {
+      target[sectionName] = {}
+    }
+    Object.assign(target[sectionName], props)
+  }
+}
+
+/**
+ * Convert a simple PlatformIO glob pattern (supports `*` and `?`) into a
+ * RegExp anchored to the full string.
+ */
+function globToRegex(pattern: string): RegExp {
+  const escaped = pattern.replace(/[.+^${}()|[\]\\]/g, '\\$&')
+  const withWildcards = escaped.replace(/\*/g, '.*').replace(/\?/g, '.')
+  return new RegExp(`^${withWildcards}$`)
+}
+
+/** Check whether a string contains glob meta-characters. */
+function isGlobPattern(value: string): boolean {
+  return /[*?\[\]]/.test(value)
+}
+
+/**
+ * Resolve `extra_configs` entries (plain paths and globs) relative to the
+ * project directory and return the list of resolved absolute paths.
+ */
+async function resolveExtraConfigPaths(
+  projectPath: string,
+  rawEntries: string[]
+): Promise<string[]> {
+  const resolved: string[] = []
+  for (const entry of rawEntries) {
+    if (!entry) continue
+    if (isGlobPattern(entry)) {
+      // Resolve the glob against the directory containing the pattern
+      const globDir = path.resolve(projectPath, path.dirname(entry))
+      const globBase = path.basename(entry)
+      const regex = globToRegex(globBase)
+      try {
+        const dirEntries = await fs.readdir(globDir)
+        for (const name of dirEntries.sort()) {
+          if (regex.test(name)) {
+            resolved.push(path.join(globDir, name))
+          }
+        }
+      } catch {
+        pioDebug(`Cannot read directory for glob: ${globDir}`)
+      }
+    } else {
+      resolved.push(path.resolve(projectPath, entry))
+    }
+  }
+  return resolved
+}
+
+/**
+ * Parse the `extra_configs` value from the `[platformio]` section into a list
+ * of individual path/glob entries.
+ */
+function parseExtraConfigsValue(value: string): string[] {
+  return value
+    .split(/\n/)
+    .map((s) => s.trim())
+    .filter(Boolean)
+}
+
+/**
+ * Read and merge all extra config files referenced from the `[platformio]`
+ * section's `extra_configs` key. Merges them in order into the provided
+ * `sections` object.
+ */
+async function mergeExtraConfigs(
+  projectPath: string,
+  sections: Sections
+): Promise<void> {
+  const pioSection = sections['platformio']
+  if (!pioSection?.['extra_configs']) return
+
+  const rawEntries = parseExtraConfigsValue(pioSection['extra_configs'])
+  const configPaths = await resolveExtraConfigPaths(projectPath, rawEntries)
+
+  for (const configPath of configPaths) {
+    try {
+      const content = await fs.readFile(configPath, 'utf8')
+      const extraSections = parsePlatformioIni(content)
+      mergeSections(sections, extraSections)
+      pioDebug(`Merged extra config: ${configPath}`)
+    } catch {
+      pioDebug(`Cannot read extra config: ${configPath}`)
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// ${section.key} variable interpolation
+// ---------------------------------------------------------------------------
+
+/** Maximum recursion depth for variable interpolation to prevent loops. */
+const MAX_INTERPOLATION_DEPTH = 10
+
+/**
+ * Resolve `${section.key}` variable references within all section values.
+ * PlatformIO allows cross-section references like `${core.platform}` or
+ * `${esp_defaults.build_flags}`.
+ */
+function interpolateVariables(sections: Sections): void {
+  const variablePattern = /\$\{([^}]+)\}/g
+
+  function resolve(
+    value: string,
+    depth: number,
+    visited: Set<string>
+  ): string {
+    if (depth > MAX_INTERPOLATION_DEPTH) return value
+    return value.replace(variablePattern, (match, ref: string) => {
+      const dotIndex = ref.indexOf('.')
+      if (dotIndex < 0) return match
+      const sectionName = ref.slice(0, dotIndex)
+      const keyName = ref.slice(dotIndex + 1)
+      const refKey = `${sectionName}.${keyName}`
+      if (visited.has(refKey)) return match // circular reference guard
+      const section = sections[sectionName]
+      if (!section || !(keyName in section)) return match
+      visited.add(refKey)
+      return resolve(section[keyName], depth + 1, new Set(visited))
+    })
+  }
+
+  for (const props of Object.values(sections)) {
+    for (const [key, value] of Object.entries(props)) {
+      if (value.includes('${')) {
+        props[key] = resolve(value, 0, new Set())
+      }
+    }
+  }
+}
+
 /**
  * Resolve a section's properties following the PlatformIO `extends` chain.
  * Handles multiple and recursive inheritance with circular-reference protection.
  */
 function resolveExtends(
   sectionName: string,
-  sections: Record<string, Record<string, string>>,
+  sections: Sections,
   visited = new Set<string>()
 ): Record<string, string> {
   if (visited.has(sectionName)) return {} // circular reference guard
@@ -92,9 +239,7 @@ function resolveExtends(
   return { ...result, ...section }
 }
 
-function parseEnvironments(
-  sections: Record<string, Record<string, string>>
-): PioEnvironment[] {
+function parseEnvironments(sections: Sections): PioEnvironment[] {
   // The [env] section (without a name) provides defaults inherited by all
   // named [env:xxx] sections.
   const baseEnv = sections['env'] ?? {}
@@ -391,6 +536,10 @@ export async function findPioProjects(): Promise<PioProject[]> {
     try {
       const content = await fs.readFile(iniPath, 'utf8')
       const sections = parsePlatformioIni(content)
+      // Merge additional config files referenced by extra_configs
+      await mergeExtraConfigs(candidatePath, sections)
+      // Resolve ${section.key} variable references across all sections
+      interpolateVariables(sections)
       const environments = parseEnvironments(sections)
       if (environments.length > 0) {
         projects.push({
