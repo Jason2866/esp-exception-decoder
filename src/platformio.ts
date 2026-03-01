@@ -66,6 +66,32 @@ function parsePlatformioIni(
   return sections
 }
 
+/**
+ * Resolve a section's properties following the PlatformIO `extends` chain.
+ * Handles multiple and recursive inheritance with circular-reference protection.
+ */
+function resolveExtends(
+  sectionName: string,
+  sections: Record<string, Record<string, string>>,
+  visited = new Set<string>()
+): Record<string, string> {
+  if (visited.has(sectionName)) return {} // circular reference guard
+  visited.add(sectionName)
+
+  const section = sections[sectionName]
+  if (!section) return {}
+
+  let result: Record<string, string> = {}
+  const extendsValue = section['extends']
+  if (extendsValue) {
+    const parents = extendsValue.split(',').map((s) => s.trim())
+    for (const parent of parents) {
+      result = { ...result, ...resolveExtends(parent, sections, visited) }
+    }
+  }
+  return { ...result, ...section }
+}
+
 function parseEnvironments(
   sections: Record<string, Record<string, string>>
 ): PioEnvironment[] {
@@ -81,8 +107,9 @@ function parseEnvironments(
     }
     hasNamedEnvs = true
     const envName = sectionName.slice(4)
-    // Merge: named env props override base [env] props
-    const merged = { ...baseEnv, ...props }
+    // Merge: base [env] → extends chain → own props
+    const resolved = resolveExtends(sectionName, sections)
+    const merged = { ...baseEnv, ...resolved }
     const platform = merged['platform'] ?? ''
     const board = merged['board'] ?? ''
     if (!board) {
@@ -329,20 +356,52 @@ export async function findPioElfPath(
 // PlatformIO project scanning
 // ---------------------------------------------------------------------------
 
+/**
+ * Collect candidate directories that may contain a platformio.ini.
+ * Checks workspace folder roots and their immediate subdirectories.
+ */
+async function collectCandidatePaths(): Promise<string[]> {
+  const candidates: string[] = []
+  for (const wsFolder of vscode.workspace.workspaceFolders ?? []) {
+    const rootPath = wsFolder.uri.fsPath
+    candidates.push(rootPath)
+    try {
+      const entries = await fs.readdir(rootPath, { withFileTypes: true })
+      for (const entry of entries) {
+        if (
+          entry.isDirectory() &&
+          !entry.name.startsWith('.') &&
+          entry.name !== 'node_modules'
+        ) {
+          candidates.push(path.join(rootPath, entry.name))
+        }
+      }
+    } catch {
+      // ignore
+    }
+  }
+  return candidates
+}
+
 export async function findPioProjects(): Promise<PioProject[]> {
   const projects: PioProject[] = []
-  for (const wsFolder of vscode.workspace.workspaceFolders ?? []) {
-    const iniPath = path.join(wsFolder.uri.fsPath, 'platformio.ini')
+  const candidatePaths = await collectCandidatePaths()
+  for (const candidatePath of candidatePaths) {
+    const iniPath = path.join(candidatePath, 'platformio.ini')
     try {
       const content = await fs.readFile(iniPath, 'utf8')
       const sections = parsePlatformioIni(content)
       const environments = parseEnvironments(sections)
       if (environments.length > 0) {
         projects.push({
-          projectPath: wsFolder.uri.fsPath,
+          projectPath: candidatePath,
           iniPath,
           environments,
         })
+      } else {
+        pioDebug(
+          `platformio.ini found at ${iniPath} but no valid environments (missing "board" key?)`
+        )
       }
     } catch {
       // not a PlatformIO project
@@ -509,10 +568,11 @@ export function syntheticFqbn(mcu: string): string {
   return `esp32:esp32:${normalizedMcu}`
 }
 
-/** Returns true if PlatformIO projects are detected in the workspace. */
+/** Returns true if at least one platformio.ini is detected in the workspace. */
 export async function hasPioProjects(): Promise<boolean> {
-  for (const wsFolder of vscode.workspace.workspaceFolders ?? []) {
-    const iniPath = path.join(wsFolder.uri.fsPath, 'platformio.ini')
+  const candidatePaths = await collectCandidatePaths()
+  for (const candidatePath of candidatePaths) {
+    const iniPath = path.join(candidatePath, 'platformio.ini')
     try {
       await fs.access(iniPath)
       return true

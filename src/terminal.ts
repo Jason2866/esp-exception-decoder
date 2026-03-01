@@ -11,6 +11,7 @@ import {
 } from './decodeParams'
 import {
   findPioProjects,
+  hasPioProjects,
   pickPioEnvironment,
   resolveEnvironment,
   syntheticFqbn,
@@ -262,6 +263,12 @@ class PioDecoderTerminal implements vscode.Pseudoterminal {
       if (!resolved) {
         const projects = await findPioProjects()
         if (projects.length === 0) {
+          const hasIni = await hasPioProjects()
+          if (hasIni) {
+            throw new Error(
+              'platformio.ini found but no valid environments detected.\nCheck that your platformio.ini defines at least one [env:name] section with a "board" property.'
+            )
+          }
           throw new Error(
             'No PlatformIO project found. Open a project with a platformio.ini file.'
           )
@@ -289,7 +296,7 @@ class PioDecoderTerminal implements vscode.Pseudoterminal {
     // Watch for ELF file changes to auto-refresh decode params after rebuild
     const pattern = new vscode.RelativePattern(
       vscode.workspace.workspaceFolders?.[0]?.uri ?? '',
-      '.pio/build/*/firmware.elf'
+      '**/.pio/build/*/firmware.elf'
     )
     this.fileWatcher = vscode.workspace.createFileSystemWatcher(pattern)
     this.fileWatcher.onDidChange(() => this.refreshParams())
