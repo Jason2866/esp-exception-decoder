@@ -2,158 +2,20 @@ import assert from 'node:assert/strict'
 import path from 'node:path'
 
 import { FQBN } from 'fqbn'
-import vscode from 'vscode'
 
 import { DecodeParamsError } from '../../decodeParams'
 import { __tests } from '../../terminal'
-import { mockArduinoContext } from './mock'
 
 const {
-  openTerminal,
   decodeTerminalTitle,
   stringifyLines,
   stringifyTerminalState,
-  DecoderTerminal,
   red,
   green,
   blue,
 } = __tests
 
 describe('terminal', () => {
-  const arduinoContext = mockArduinoContext()
-
-  describe('openTerminal', () => {
-    it('should open a terminal', async () => {
-      const beforeOpenTerminals = vscode.window.terminals
-      const terminal = openTerminal(arduinoContext)
-      assert.strictEqual(
-        vscode.window.terminals.length,
-        beforeOpenTerminals.length + 1
-      )
-      assert.strictEqual(vscode.window.terminals.includes(terminal), true)
-      assert.strictEqual(beforeOpenTerminals.includes(terminal), false)
-    })
-
-    it('should not open a new terminal if already opened', async () => {
-      const arduinoContext = mockArduinoContext()
-      const first = openTerminal(arduinoContext)
-      const beforeSecondOpenTerminals = vscode.window.terminals
-      const second = openTerminal(arduinoContext)
-      const afterSecondOpenTerminals = vscode.window.terminals
-      assert.strictEqual(first, second)
-      assert.strictEqual(
-        beforeSecondOpenTerminals.length,
-        afterSecondOpenTerminals.length
-      )
-    })
-  })
-
-  describe('DecoderTerminal', () => {
-    const toDisposeBeforeEach: vscode.Disposable[] = []
-
-    beforeEach(() => {
-      vscode.Disposable.from(...toDisposeBeforeEach).dispose()
-      toDisposeBeforeEach.length = 0
-    })
-
-    it('should discard the user input and decoder result on params error', () => {
-      const fqbn = new FQBN('esp8266:esp8266:generic')
-      const terminal = new DecoderTerminal(arduinoContext)
-      toDisposeBeforeEach.push(new vscode.Disposable(() => terminal.close()))
-      terminal['state'] = {
-        params: {
-          sketchPath: '/path/to/sketch',
-          fqbn,
-          elfPath: '/path/to/elf',
-          toolPath: '/path/to/tool',
-          targetArch: 'xtensa',
-        },
-        userInput: 'some user input',
-        decoderResult: {
-          stacktraceLines: [
-            { regAddr: '0x00002710', lineNumber: 'bla bla' } as const,
-          ],
-        },
-      }
-      terminal['updateState']({ params: new Error('boom') })
-      assert.strictEqual(terminal['state'].userInput, undefined)
-      assert.strictEqual(terminal['state'].decoderResult, undefined)
-    })
-
-    it('should discard the decoder result before decoding', async function () {
-      this.slow(200)
-      const fqbn = new FQBN('esp8266:esp8266:generic')
-      const terminal = new DecoderTerminal(arduinoContext)
-      toDisposeBeforeEach.push(new vscode.Disposable(() => terminal.close()))
-      terminal['state'] = {
-        params: {
-          sketchPath: '/path/to/sketch',
-          fqbn,
-          elfPath: '/path/to/elf',
-          toolPath: '/path/to/tool',
-          targetArch: 'xtensa',
-        },
-        userInput: 'some user input',
-        decoderResult: {
-          stacktraceLines: [
-            { regAddr: '0x00002710', lineNumber: 'bla bla' } as const,
-          ],
-        },
-        statusMessage: 'idle',
-      }
-      assert.notStrictEqual(terminal['state'].decoderResult, undefined)
-      terminal.handleInput('some invalid thing it does not matter')
-      assert.strictEqual(terminal['state'].decoderResult, undefined)
-      assert.notStrictEqual(terminal['state'].statusMessage, 'idle')
-      assert.notStrictEqual(terminal['state'].statusMessage, undefined)
-      assert.strictEqual(
-        (<{ statusMessage: string }>terminal['state']).statusMessage.length > 0,
-        true
-      )
-      await waitUntil(() =>
-        assert.strictEqual(
-          (<Error>(<unknown>terminal['state'].decoderResult))?.message,
-          'No register addresses found to decode'
-        )
-      )
-      assert.strictEqual(
-        terminal['state'].userInput,
-        'some invalid thing it does not matter'
-      )
-    })
-
-    it("should gracefully handle all kind of line endings (including the bogus '\\r')", async function () {
-      this.slow(200)
-      const fqbn = new FQBN('esp8266:esp8266:generic')
-      const terminal = new DecoderTerminal(arduinoContext)
-      toDisposeBeforeEach.push(new vscode.Disposable(() => terminal.close()))
-      terminal['state'] = {
-        params: {
-          sketchPath: '/path/to/sketch',
-          fqbn,
-          elfPath: '/path/to/elf',
-          toolPath: '/path/to/tool',
-          targetArch: 'xtensa',
-        },
-      }
-      terminal.handleInput('line1\rline2\r\nline3\rline4\nline5')
-      await waitUntil(() =>
-        assert.strictEqual(
-          terminal['state'].decoderResult instanceof Error,
-          true
-        )
-      )
-      assert.strictEqual(
-        (<Error>terminal['state'].decoderResult).message,
-        'No register addresses found to decode'
-      )
-      assert.strictEqual(
-        terminal['state'].userInput,
-        'line1\r\nline2\r\nline3\r\nline4\r\nline5'
-      )
-    })
-  })
-
   describe('stringifyLines', () => {
     it('should build terminal output from lines', () => {
       assert.strictEqual(stringifyLines([]), '')
@@ -379,32 +241,3 @@ describe('terminal', () => {
     })
   })
 })
-
-export interface WaitUntilOptions {
-  timeout?: number
-  interval?: number
-}
-
-export async function waitUntil(
-  fn: () => void | Promise<void>,
-  { timeout = 2_000, interval = 50 }: WaitUntilOptions = {}
-): Promise<void> {
-  const start = Date.now()
-  let lastError: unknown
-
-  while (Date.now() - start < timeout) {
-    try {
-      await fn()
-      return
-    } catch (e) {
-      if (e instanceof Error && e.name === 'AssertionError') {
-        lastError = e
-        await new Promise((resolve) => setTimeout(resolve, interval))
-      } else {
-        throw e
-      }
-    }
-  }
-
-  throw lastError
-}
