@@ -118,7 +118,7 @@
   "engines": {
     "vscode": "^1.78.0"
   },
-  "icon": "resources/images/esp-exception-decoder_large.png",
+  "icon": "resources/images/esp-exception-decoder_icon.png",
   "galleryBanner": {
     "color": "#fff",
     "theme": "light"
