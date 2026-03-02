@@ -162,22 +162,26 @@ async function startMonitor(
     pty.setSerialConnected(true, `${selectedPort} @ ${baud}`)
   }
 
-  // 4. Spawn pio device monitor
-  const args = [
-    'device',
-    'monitor',
-    '--port',
-    selectedPort,
-    '--baud',
-    String(baud),
-    '--no-reconnect',
-  ]
+  // 4. Spawn pyserial-based reader (avoids miniterm/termios issues)
+  const pyScript = [
+    'import serial, sys, time',
+    `ser = serial.Serial('${selectedPort.replace(/'/g, "\\'")}', ${baud}, timeout=0.1)`,
+    'try:',
+    '    while True:',
+    '        data = ser.read(1024)',
+    '        if data:',
+    '            sys.stdout.buffer.write(data)',
+    '            sys.stdout.buffer.flush()',
+    'except (KeyboardInterrupt, serial.SerialException):',
+    '    pass',
+    'finally:',
+    '    ser.close()',
+  ].join('\n')
 
-  monitorDebug(`Spawning: pio ${args.join(' ')}`)
+  monitorDebug(`Spawning pyserial reader on ${selectedPort} @ ${baud}`)
 
   try {
-    monitorProcess = spawn('pio', args, {
-      cwd: activeProject?.projectPath,
+    monitorProcess = spawn('python3', ['-u', '-c', pyScript], {
       stdio: ['pipe', 'pipe', 'pipe'],
     })
   } catch (err) {

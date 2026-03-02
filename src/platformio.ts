@@ -633,19 +633,25 @@ export async function resolveEnvironment(
 ): Promise<PioResolvedEnv | undefined> {
   const elfPath = await findPioElfPath(project.projectPath, env.name)
   if (!elfPath) {
-    pioDebug(`No ELF found for env:${env.name}`)
+    pioDebug(
+      `No ELF found for env:${env.name} at ${project.projectPath}/.pio/build/${env.name}/firmware.elf`
+    )
     return undefined
   }
 
   const targetArch = await resolveBoardArch(env.board, env.platform)
   if (!targetArch) {
-    pioDebug(`Cannot determine target arch for board: ${env.board}`)
+    pioDebug(
+      `Cannot determine target arch for board: ${env.board} (platform: ${env.platform})`
+    )
     return undefined
   }
 
   const gdbToolPath = await findGdbToolPath(targetArch)
   if (!gdbToolPath) {
-    pioDebug(`Cannot find GDB tool for arch: ${targetArch}`)
+    pioDebug(
+      `Cannot find GDB tool for arch: ${targetArch} in ${platformioPackagesPath()}`
+    )
     return undefined
   }
 
@@ -671,19 +677,44 @@ export async function resolveEnvironment(
 /**
  * Picks a PlatformIO environment. If only one exists, uses that; otherwise
  * shows a quick pick.
+ *
+ * Returns `{ resolved }` on success, or `{ reason }` explaining why no
+ * environment could be resolved.
  */
-export async function pickPioEnvironment(): Promise<
-  PioResolvedEnv | undefined
-> {
+export interface PioPickResult {
+  resolved?: PioResolvedEnv
+  failures?: string[]
+}
+
+export async function pickPioEnvironment(): Promise<PioPickResult> {
   const projects = await findPioProjects()
   if (projects.length === 0) {
-    return undefined
+    return {}
   }
 
-  // Collect all resolvable environments
+  // Collect all resolvable environments and track failures
   const resolved: PioResolvedEnv[] = []
+  const failures: string[] = []
   for (const project of projects) {
     for (const env of project.environments) {
+      const elfPath = await findPioElfPath(project.projectPath, env.name)
+      if (!elfPath) {
+        continue
+      }
+      const targetArch = await resolveBoardArch(env.board, env.platform)
+      if (!targetArch) {
+        failures.push(
+          `env:${env.name} — unknown architecture for board "${env.board}"`
+        )
+        continue
+      }
+      const gdbToolPath = await findGdbToolPath(targetArch)
+      if (!gdbToolPath) {
+        failures.push(
+          `env:${env.name} — GDB tool not found for ${targetArch}`
+        )
+        continue
+      }
       const r = await resolveEnvironment(project, env)
       if (r) {
         resolved.push(r)
@@ -692,11 +723,14 @@ export async function pickPioEnvironment(): Promise<
   }
 
   if (resolved.length === 0) {
-    return undefined
+    if (failures.length > 0) {
+      pioDebug(`No resolvable environments:\n${failures.join('\n')}`)
+    }
+    return { failures: failures.length > 0 ? failures : undefined }
   }
 
   if (resolved.length === 1) {
-    return resolved[0]
+    return { resolved: resolved[0] }
   }
 
   const pick = await vscode.window.showQuickPick(
@@ -709,7 +743,7 @@ export async function pickPioEnvironment(): Promise<
     { placeHolder: 'Select PlatformIO environment for crash decoding' }
   )
 
-  return pick?.resolved
+  return { resolved: pick?.resolved }
 }
 
 // ---------------------------------------------------------------------------

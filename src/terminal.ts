@@ -83,6 +83,8 @@ function stringifyTerminalState(state: DecodeTerminalState): string {
   const { params, userInput, decoderResult, serialConnected, serialPortLabel } =
     state
   let { statusMessage } = state
+
+  // Show sketch info or decoder error
   if (params instanceof Error && !(params instanceof DecodeParamsError)) {
     lines.push(red(toTerminalEOL(params.message)))
   } else {
@@ -92,38 +94,44 @@ function stringifyTerminalState(state: DecodeTerminalState): string {
         fqbn.toString()
       )}`
     )
-    if (serialConnected && serialPortLabel) {
-      lines.push(
-        `Serial: ${green('CONNECTED')} ${blue(serialPortLabel)}`
-      )
-    }
     if (params instanceof DecodeParamsError) {
       statusMessage = red(toTerminalEOL(params.message))
-    } else {
-      if (state.serialLines && state.serialLines.length > 0) {
-        lines.push('')
-        lines.push(...state.serialLines.map((l) => toTerminalEOL(l)))
-      }
-      if (userInput) {
-        lines.push('', userInput)
-      }
-      if (decoderResult) {
-        lines.push('')
-        if (decoderResult instanceof Error) {
-          lines.push(red(toTerminalEOL(decoderResult.message)))
-        } else {
-          lines.push(
-            ...stringifyDecodeResult(decoderResult, {
-              lineSeparator: terminalEOL,
-              color: 'force',
-            }).split(terminalEOL)
-          )
-        }
+    }
+  }
+
+  // Serial monitor status and output (always shown, independent of decoder)
+  if (serialConnected && serialPortLabel) {
+    lines.push(
+      `Serial: ${green('CONNECTED')} ${blue(serialPortLabel)}`
+    )
+  }
+  if (state.serialLines && state.serialLines.length > 0) {
+    lines.push('')
+    lines.push(...state.serialLines.map((l) => toTerminalEOL(l)))
+  }
+
+  // Decode results (only when params are valid)
+  if (!(params instanceof Error)) {
+    if (userInput) {
+      lines.push('', userInput)
+    }
+    if (decoderResult) {
+      lines.push('')
+      if (decoderResult instanceof Error) {
+        lines.push(red(toTerminalEOL(decoderResult.message)))
+      } else {
+        lines.push(
+          ...stringifyDecodeResult(decoderResult, {
+            lineSeparator: terminalEOL,
+            color: 'force',
+          }).split(terminalEOL)
+        )
       }
     }
-    if (statusMessage) {
-      lines.push('', statusMessage, '')
-    }
+  }
+
+  if (statusMessage) {
+    lines.push('', statusMessage, '')
   }
   return stringifyLines(lines)
 }
@@ -369,8 +377,8 @@ class PioDecoderTerminal implements vscode.Pseudoterminal {
   private async initializeFromPio(): Promise<void> {
     let params: DecodeTerminalState['params']
     try {
-      const resolved = await pickPioEnvironment()
-      if (!resolved) {
+      const pickResult = await pickPioEnvironment()
+      if (!pickResult.resolved) {
         const projects = await findPioProjects()
         if (projects.length === 0) {
           const hasIni = await hasPioProjects()
@@ -383,10 +391,17 @@ class PioDecoderTerminal implements vscode.Pseudoterminal {
             'No PlatformIO project found. Open a project with a platformio.ini file.'
           )
         }
+        if (pickResult.failures && pickResult.failures.length > 0) {
+          throw new Error(
+            'Environments found but cannot resolve:\n' +
+              pickResult.failures.join('\n')
+          )
+        }
         throw new Error(
           'No compiled PlatformIO environment found. Run "pio run" to compile first.'
         )
       }
+      const resolved = pickResult.resolved
       this.resolvedEnv = resolved
       params = await createPioDecodeParams({
         elfPath: resolved.elfPath,
