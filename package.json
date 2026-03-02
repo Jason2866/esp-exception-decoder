@@ -51,6 +51,7 @@
       {
         "command": "espExceptionDecoder.showTerminal",
         "title": "Show Decoder Terminal",
+        "icon": "$(debug-console)",
         "category": "ESP Exception Decoder"
       }
     ],
@@ -60,13 +61,43 @@
         "label": "ESP Crash Replay"
       }
     ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "esp-exception-decoder",
+          "title": "ESP Exception Decoder",
+          "icon": "resources/images/activity-bar-icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "esp-exception-decoder": [
+        {
+          "id": "espExceptionDecoder.welcome",
+          "name": "ESP Exception Decoder"
+        }
+      ]
+    },
     "menus": {
       "commandPalette": [
         {
           "command": "espExceptionDecoder.showTerminal"
         }
+      ],
+      "view/title": [
+        {
+          "command": "espExceptionDecoder.showTerminal",
+          "when": "view == espExceptionDecoder.welcome",
+          "group": "navigation"
+        }
       ]
-    }
+    },
+    "viewsWelcome": [
+      {
+        "view": "espExceptionDecoder.welcome",
+        "contents": "Decode ESP32/ESP8266 crash stack traces.\n[Open Decoder Terminal](command:espExceptionDecoder.showTerminal)"
+      }
+    ]
   },
   "activationEvents": [
     "onStartupFinished"

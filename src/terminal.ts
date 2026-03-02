@@ -41,6 +41,10 @@ export function activatePioDecoderTerminal(
 ): void {
   context.subscriptions.push(
     new vscode.Disposable(() => _debugOutput?.dispose()),
+    vscode.window.registerTreeDataProvider('espExceptionDecoder.welcome', {
+      getTreeItem: () => new vscode.TreeItem(''),
+      getChildren: () => [],
+    }),
     vscode.commands.registerCommand('espExceptionDecoder.showTerminal', () =>
       openPioTerminal({
         show: true,
