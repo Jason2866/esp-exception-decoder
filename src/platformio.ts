@@ -18,6 +18,7 @@ export interface PioEnvironment {
   board: string
   framework?: string
   monitorSpeed?: number
+  monitorFilters?: string[]
   buildFlags?: string
 }
 
@@ -268,6 +269,7 @@ function parseEnvironments(sections: Sections): PioEnvironment[] {
       monitorSpeed: merged['monitor_speed']
         ? parseInt(merged['monitor_speed'], 10)
         : undefined,
+      monitorFilters: parseMonitorFilters(merged['monitor_filters']),
       buildFlags: merged['build_flags'],
     })
   }
@@ -283,11 +285,23 @@ function parseEnvironments(sections: Sections): PioEnvironment[] {
       monitorSpeed: baseEnv['monitor_speed']
         ? parseInt(baseEnv['monitor_speed'], 10)
         : undefined,
+      monitorFilters: parseMonitorFilters(baseEnv['monitor_filters']),
       buildFlags: baseEnv['build_flags'],
     })
   }
 
   return envs
+}
+
+function parseMonitorFilters(
+  value: string | undefined
+): string[] | undefined {
+  if (!value) return undefined
+  const filters = value
+    .split(/[,\n]/)
+    .map((s) => s.trim())
+    .filter(Boolean)
+  return filters.length > 0 ? filters : undefined
 }
 
 // ---------------------------------------------------------------------------
@@ -715,6 +729,43 @@ export function syntheticFqbn(mcu: string): string {
     return `esp8266:esp8266:${normalizedMcu}`
   }
   return `esp32:esp32:${normalizedMcu}`
+}
+
+// ---------------------------------------------------------------------------
+// Serial port listing via PlatformIO CLI
+// ---------------------------------------------------------------------------
+
+export interface PioSerialPort {
+  port: string
+  description: string
+  hwid: string
+}
+
+export async function listPioSerialPorts(): Promise<PioSerialPort[]> {
+  const { execFile } = await import('node:child_process')
+  const { promisify } = await import('node:util')
+  const exec = promisify(execFile)
+  try {
+    const { stdout } = await exec('pio', ['device', 'list', '--json-output'], {
+      timeout: 10000,
+    })
+    const devices: Array<{
+      port: string
+      description?: string
+      hwid?: string
+      type?: string
+    }> = JSON.parse(stdout)
+    return devices
+      .filter((d) => !d.type || d.type === 'Serial')
+      .map((d) => ({
+        port: d.port,
+        description: d.description ?? '',
+        hwid: d.hwid ?? '',
+      }))
+  } catch (err) {
+    pioDebug(`Failed to list serial ports: ${err}`)
+    return []
+  }
 }
 
 /** Returns true if at least one platformio.ini is detected in the workspace. */

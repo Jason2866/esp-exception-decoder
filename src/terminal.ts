@@ -66,6 +66,9 @@ interface DecodeTerminalState {
   userInput?: string | undefined
   decoderResult?: DecodeResult | Error | undefined
   statusMessage?: string | undefined
+  serialConnected?: boolean
+  serialPortLabel?: string
+  serialLines?: string[]
 }
 
 function findDecodeTerminal(): vscode.Terminal | undefined {
@@ -77,7 +80,8 @@ function findDecodeTerminal(): vscode.Terminal | undefined {
 
 function stringifyTerminalState(state: DecodeTerminalState): string {
   const lines = [decodeTerminalTitle]
-  const { params, userInput, decoderResult } = state
+  const { params, userInput, decoderResult, serialConnected, serialPortLabel } =
+    state
   let { statusMessage } = state
   if (params instanceof Error && !(params instanceof DecodeParamsError)) {
     lines.push(red(toTerminalEOL(params.message)))
@@ -88,9 +92,18 @@ function stringifyTerminalState(state: DecodeTerminalState): string {
         fqbn.toString()
       )}`
     )
+    if (serialConnected && serialPortLabel) {
+      lines.push(
+        `Serial: ${green('CONNECTED')} ${blue(serialPortLabel)}`
+      )
+    }
     if (params instanceof DecodeParamsError) {
       statusMessage = red(toTerminalEOL(params.message))
     } else {
+      if (state.serialLines && state.serialLines.length > 0) {
+        lines.push('')
+        lines.push(...state.serialLines.map((l) => toTerminalEOL(l)))
+      }
       if (userInput) {
         lines.push('', userInput)
       }
@@ -144,33 +157,61 @@ function color(text: string, foregroundColor: ANSIStyle): string {
   return `\x1b[${foregroundColor}m${text}${resetFgColorStyle}`
 }
 
+let _activePty: PioDecoderTerminal | undefined
+
 function openPioTerminal(
   options: { show: boolean; debug: Debug; replayStore?: ReplayStore } = {
     show: true,
     debug: terminalDebug,
   }
-): vscode.Terminal {
+): { terminal: vscode.Terminal; pty: PioDecoderTerminal } {
   const { debug, show } = options
-  const terminal =
-    findDecodeTerminal() ?? createPioDecodeTerminal(debug, options.replayStore)
+  const existing = findDecodeTerminal()
+  if (existing && _activePty) {
+    if (show) existing.show()
+    return { terminal: existing, pty: _activePty }
+  }
+  const { terminal, pty } = createPioDecodeTerminal(debug, options.replayStore)
   if (show) {
     terminal.show()
   }
-  return terminal
+  return { terminal, pty }
 }
 
 function createPioDecodeTerminal(
   dbg: Debug,
   replayStore?: ReplayStore
-): vscode.Terminal {
+): { terminal: vscode.Terminal; pty: PioDecoderTerminal } {
   const pty = new PioDecoderTerminal(dbg, replayStore)
+  _activePty = pty
   const options: vscode.ExtensionTerminalOptions = {
     name: decodeTerminalName,
     pty,
     iconPath: new vscode.ThemeIcon('debug-console'),
   }
-  return vscode.window.createTerminal(options)
+  const terminal = vscode.window.createTerminal(options)
+  return { terminal, pty }
 }
+
+export function getActivePty(): PioDecoderTerminal | undefined {
+  return _activePty
+}
+
+const MAX_SERIAL_LINES = 500
+const REDRAW_THROTTLE_MS = 100
+const CRASH_IDLE_TIMEOUT_MS = 800
+
+const crashStartPatterns = [
+  /Guru Meditation Error/,
+  /Backtrace:/,
+  /Core\s+\d+\s+panic/,
+  /Exception \(/,
+  /ELF file SHA256:/,
+  /assert failed:/,
+  /Stack memory:/,
+  /Decoding stack results/,
+  />>>stack>>>/,
+]
 
 class PioDecoderTerminal implements vscode.Pseudoterminal {
   readonly onDidWrite: vscode.Event<string>
@@ -184,6 +225,9 @@ class PioDecoderTerminal implements vscode.Pseudoterminal {
   private abortController: AbortController | undefined
   private resolvedEnv: PioResolvedEnv | undefined
   private fileWatcher: vscode.FileSystemWatcher | undefined
+  private redrawTimer: ReturnType<typeof setTimeout> | undefined
+  private crashBuffer: string[] | undefined
+  private crashIdleTimer: ReturnType<typeof setTimeout> | undefined
 
   constructor(
     private readonly debug: Debug = terminalDebug,
@@ -212,7 +256,69 @@ class PioDecoderTerminal implements vscode.Pseudoterminal {
   }
 
   close(): void {
+    clearTimeout(this.redrawTimer)
+    clearTimeout(this.crashIdleTimer)
     vscode.Disposable.from(...this.toDispose).dispose()
+  }
+
+  appendSerialData(data: string): void {
+    const serialLines = this.state.serialLines ?? []
+    const newLines = data.split(/\r?\n|\r/)
+    for (const line of newLines) {
+      serialLines.push(line)
+      this.detectCrashLine(line)
+    }
+    // Cap ring buffer
+    while (serialLines.length > MAX_SERIAL_LINES) {
+      serialLines.shift()
+    }
+    this.state.serialLines = serialLines
+    this.scheduleRedraw()
+  }
+
+  setSerialConnected(connected: boolean, portLabel?: string): void {
+    this.updateState({
+      serialConnected: connected,
+      serialPortLabel: portLabel,
+      serialLines: connected ? [] : this.state.serialLines,
+    })
+  }
+
+  private detectCrashLine(line: string): void {
+    if (!this.crashBuffer) {
+      const isCrashStart = crashStartPatterns.some((p) => p.test(line))
+      if (isCrashStart) {
+        this.debug(`Crash trace detected: ${line}`)
+        this.crashBuffer = [line]
+        this.resetCrashIdleTimer()
+      }
+      return
+    }
+    this.crashBuffer.push(line)
+    this.resetCrashIdleTimer()
+  }
+
+  private resetCrashIdleTimer(): void {
+    clearTimeout(this.crashIdleTimer)
+    this.crashIdleTimer = setTimeout(() => {
+      this.finalizeCrashBuffer()
+    }, CRASH_IDLE_TIMEOUT_MS)
+  }
+
+  private finalizeCrashBuffer(): void {
+    if (!this.crashBuffer || this.crashBuffer.length === 0) return
+    const crashText = this.crashBuffer.join('\n')
+    this.crashBuffer = undefined
+    this.debug(`Auto-decoding crash trace (${crashText.length} chars)`)
+    this.handleInput(crashText)
+  }
+
+  private scheduleRedraw(): void {
+    if (this.redrawTimer) return
+    this.redrawTimer = setTimeout(() => {
+      this.redrawTimer = undefined
+      this.redrawTerminal()
+    }, REDRAW_THROTTLE_MS)
   }
 
   handleInput(data: string): void {

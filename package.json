@@ -53,6 +53,12 @@
         "title": "Show Decoder Terminal",
         "icon": "$(debug-console)",
         "category": "ESP Exception Decoder"
+      },
+      {
+        "command": "espExceptionDecoder.toggleSerialMonitor",
+        "title": "Toggle Serial Monitor",
+        "icon": "$(plug)",
+        "category": "ESP Exception Decoder"
       }
     ],
     "debuggers": [
@@ -82,11 +88,19 @@
       "commandPalette": [
         {
           "command": "espExceptionDecoder.showTerminal"
+        },
+        {
+          "command": "espExceptionDecoder.toggleSerialMonitor"
         }
       ],
       "view/title": [
         {
           "command": "espExceptionDecoder.showTerminal",
+          "when": "view == espExceptionDecoder.welcome",
+          "group": "navigation"
+        },
+        {
+          "command": "espExceptionDecoder.toggleSerialMonitor",
           "when": "view == espExceptionDecoder.welcome",
           "group": "navigation"
         }
@@ -95,7 +109,7 @@
     "viewsWelcome": [
       {
         "view": "espExceptionDecoder.welcome",
-        "contents": "Decode ESP32/ESP8266 crash stack traces.\n[Open Decoder Terminal](command:espExceptionDecoder.showTerminal)"
+        "contents": "Decode ESP32/ESP8266 crash stack traces.\n[Open Decoder Terminal](command:espExceptionDecoder.showTerminal)\n[Connect Serial Monitor](command:espExceptionDecoder.toggleSerialMonitor)"
       }
     ]
   },

@@ -2,6 +2,7 @@ import vscode from 'vscode'
 
 import { ReplayStore } from './replay'
 import { registerReplay } from './replayRegistration'
+import { activateSerialMonitor } from './serialMonitor'
 import { activatePioDecoderTerminal } from './terminal'
 
 export async function activate(
@@ -11,4 +12,5 @@ export async function activate(
   context.subscriptions.push(replayStore)
   registerReplay(context, replayStore)
   activatePioDecoderTerminal(context, replayStore)
+  activateSerialMonitor(context)
 }
