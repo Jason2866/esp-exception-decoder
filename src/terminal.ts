@@ -208,6 +208,7 @@ export function getActivePty(): PioDecoderTerminal | undefined {
 const MAX_SERIAL_LINES = 500
 const REDRAW_THROTTLE_MS = 100
 const CRASH_IDLE_TIMEOUT_MS = 800
+const CRASH_DEDUP_WINDOW_MS = 5000
 
 const crashStartPatterns = [
   /Guru Meditation Error/,
@@ -220,6 +221,8 @@ const crashStartPatterns = [
   /Decoding stack results/,
   />>>stack>>>/,
 ]
+
+const crashEndPatterns = [/Rebooting\.\.\./, /<<<stack<<</, /={10,}/]
 
 class PioDecoderTerminal implements vscode.Pseudoterminal {
   readonly onDidWrite: vscode.Event<string>
@@ -236,6 +239,11 @@ class PioDecoderTerminal implements vscode.Pseudoterminal {
   private redrawTimer: ReturnType<typeof setTimeout> | undefined
   private crashBuffer: string[] | undefined
   private crashIdleTimer: ReturnType<typeof setTimeout> | undefined
+  private lastCrashSignature: string | undefined
+  private lastCrashTime = 0
+  private suppressedCount = 0
+  private serialLineBuffer = ''
+  private serialPaused = false
 
   constructor(
     private readonly debug: Debug = terminalDebug,
@@ -270,12 +278,23 @@ class PioDecoderTerminal implements vscode.Pseudoterminal {
   }
 
   appendSerialData(data: string): void {
+    // Buffer partial lines: serial data arrives in arbitrary chunks
+    this.serialLineBuffer += data
+    const parts = this.serialLineBuffer.split(/\r?\n|\r/)
+    // Last element is an incomplete line — keep it in the buffer
+    this.serialLineBuffer = parts.pop() ?? ''
+
+    if (parts.length === 0) return
+
     const serialLines = this.state.serialLines ?? []
-    const newLines = data.split(/\r?\n|\r/)
-    for (const line of newLines) {
-      serialLines.push(line)
+    for (const line of parts) {
+      // Always run crash detection, even when display is paused
       this.detectCrashLine(line)
+      if (!this.serialPaused) {
+        serialLines.push(line)
+      }
     }
+    if (this.serialPaused) return
     // Cap ring buffer
     while (serialLines.length > MAX_SERIAL_LINES) {
       serialLines.shift()
@@ -285,6 +304,11 @@ class PioDecoderTerminal implements vscode.Pseudoterminal {
   }
 
   setSerialConnected(connected: boolean, portLabel?: string): void {
+    if (connected) {
+      this.serialPaused = false
+      this.suppressedCount = 0
+      this.lastCrashSignature = undefined
+    }
     this.updateState({
       serialConnected: connected,
       serialPortLabel: portLabel,
@@ -293,8 +317,15 @@ class PioDecoderTerminal implements vscode.Pseudoterminal {
   }
 
   private detectCrashLine(line: string): void {
+    const isCrashStart = crashStartPatterns.some((p) => p.test(line))
+
+    // If a new crash starts while buffering, finalize the old one first
+    if (isCrashStart && this.crashBuffer) {
+      clearTimeout(this.crashIdleTimer)
+      this.finalizeCrashBuffer()
+    }
+
     if (!this.crashBuffer) {
-      const isCrashStart = crashStartPatterns.some((p) => p.test(line))
       if (isCrashStart) {
         this.debug(`Crash trace detected: ${line}`)
         this.crashBuffer = [line]
@@ -302,6 +333,16 @@ class PioDecoderTerminal implements vscode.Pseudoterminal {
       }
       return
     }
+
+    // Finalize immediately on crash-end markers
+    const isCrashEnd = crashEndPatterns.some((p) => p.test(line))
+    if (isCrashEnd) {
+      this.crashBuffer.push(line)
+      clearTimeout(this.crashIdleTimer)
+      this.finalizeCrashBuffer()
+      return
+    }
+
     this.crashBuffer.push(line)
     this.resetCrashIdleTimer()
   }
@@ -317,7 +358,35 @@ class PioDecoderTerminal implements vscode.Pseudoterminal {
     if (!this.crashBuffer || this.crashBuffer.length === 0) return
     const crashText = this.crashBuffer.join('\n')
     this.crashBuffer = undefined
+
+    // Dedup: extract stable crash signature (MEPC, MCAUSE, error type)
+    // and suppress repeated identical crashes
+    const signature = extractCrashSignature(crashText)
+    const now = Date.now()
+    if (
+      signature === this.lastCrashSignature &&
+      now - this.lastCrashTime < CRASH_DEDUP_WINDOW_MS
+    ) {
+      this.suppressedCount++
+      this.serialPaused = true
+      this.lastCrashTime = now
+      this.debug(
+        `Suppressed duplicate crash #${this.suppressedCount}`
+      )
+      this.updateState({
+        statusMessage: `Crash loop detected — repeated crash suppressed (×${this.suppressedCount + 1})`,
+        serialLines: [],
+      })
+      return
+    }
+    this.lastCrashSignature = signature
+    this.lastCrashTime = now
+    this.suppressedCount = 0
+    this.serialPaused = false
+
+    // Clear serial lines so decode result is visible
     this.debug(`Auto-decoding crash trace (${crashText.length} chars)`)
+    this.state.serialLines = []
     this.handleInput(crashText)
   }
 
@@ -336,7 +405,12 @@ class PioDecoderTerminal implements vscode.Pseudoterminal {
       return
     }
     if (this.state.params instanceof Error) {
-      this.debug(`handleInput, skip: ${this.state.params.message}, ${data}`)
+      this.debug(`handleInput, no decode params available`)
+      this.updateState({
+        userInput: toTerminalEOL(data),
+        statusMessage:
+          'Crash received (decoding unavailable — no ELF file loaded)',
+      })
       return
     }
     const params = this.state.params
@@ -483,6 +557,28 @@ class PioDecoderTerminal implements vscode.Pseudoterminal {
     this.onDidWriteEmitter.fire(clear)
     this.onDidWriteEmitter.fire(output)
   }
+}
+
+/**
+ * Extract a stable crash signature from the crash text. Uses MEPC, MCAUSE,
+ * RA, and the error description — these stay identical across reboot loops
+ * even though stack memory values change slightly.
+ */
+function extractCrashSignature(text: string): string {
+  const parts: string[] = []
+  const mepc = text.match(/MEPC\s*:\s*(0x[0-9a-fA-F]+)/)
+  if (mepc) parts.push(`MEPC=${mepc[1]}`)
+  const ra = text.match(/RA\s*:\s*(0x[0-9a-fA-F]+)/)
+  if (ra) parts.push(`RA=${ra[1]}`)
+  const mcause = text.match(/MCAUSE\s*:\s*(0x[0-9a-fA-F]+)/)
+  if (mcause) parts.push(`MCAUSE=${mcause[1]}`)
+  const guru = text.match(/Guru Meditation Error:.*/)
+  if (guru) parts.push(guru[0])
+  const bt = text.match(/Backtrace:\s*(.*)/)
+  if (bt) parts.push(`BT=${bt[1]}`)
+  const pc = text.match(/PC\s*:\s*(0x[0-9a-fA-F]+)/)
+  if (pc) parts.push(`PC=${pc[1]}`)
+  return parts.join('|') || text.slice(0, 200)
 }
 
 /** (non-API) */
