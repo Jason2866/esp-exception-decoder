@@ -210,13 +210,25 @@ const REDRAW_THROTTLE_MS = 100
 const CRASH_IDLE_TIMEOUT_MS = 800
 const CRASH_DEDUP_WINDOW_MS = 5000
 
-const crashStartPatterns = [
+/**
+ * Primary crash-start patterns: these always indicate the beginning of a
+ * _new_ crash and will finalize any crash that is currently being buffered.
+ */
+const crashPrimaryStartPatterns = [
   /Guru Meditation Error/,
-  /Backtrace:/,
   /Core\s+\d+\s+panic/,
+  /assert failed:/,
+]
+
+/**
+ * Secondary crash-start patterns: these can start a crash buffer when none
+ * is active, but they do NOT interrupt an already-active buffer because they
+ * also appear _inside_ a crash (e.g. "Stack memory:", "ELF file SHA256:").
+ */
+const crashSecondaryStartPatterns = [
+  /Backtrace:/,
   /Exception \(/,
   /ELF file SHA256:/,
-  /assert failed:/,
   /Stack memory:/,
   /Decoding stack results/,
   />>>stack>>>/,
@@ -244,6 +256,7 @@ class PioDecoderTerminal implements vscode.Pseudoterminal {
   private suppressedCount = 0
   private serialLineBuffer = ''
   private serialPaused = false
+  private serialResumeTimer: ReturnType<typeof setTimeout> | undefined
 
   constructor(
     private readonly debug: Debug = terminalDebug,
@@ -274,6 +287,7 @@ class PioDecoderTerminal implements vscode.Pseudoterminal {
   close(): void {
     clearTimeout(this.redrawTimer)
     clearTimeout(this.crashIdleTimer)
+    clearTimeout(this.serialResumeTimer)
     vscode.Disposable.from(...this.toDispose).dispose()
   }
 
@@ -317,10 +331,15 @@ class PioDecoderTerminal implements vscode.Pseudoterminal {
   }
 
   private detectCrashLine(line: string): void {
-    const isCrashStart = crashStartPatterns.some((p) => p.test(line))
+    const isPrimaryStart = crashPrimaryStartPatterns.some((p) => p.test(line))
+    const isSecondaryStart =
+      !isPrimaryStart && crashSecondaryStartPatterns.some((p) => p.test(line))
+    const isCrashStart = isPrimaryStart || isSecondaryStart
 
-    // If a new crash starts while buffering, finalize the old one first
-    if (isCrashStart && this.crashBuffer) {
+    // Only a primary crash start (e.g. "Guru Meditation Error") may
+    // interrupt an active buffer.  Secondary patterns like "Stack memory:"
+    // or "ELF file SHA256:" appear *inside* a crash and must not split it.
+    if (isPrimaryStart && this.crashBuffer) {
       clearTimeout(this.crashIdleTimer)
       this.finalizeCrashBuffer()
     }
@@ -373,6 +392,7 @@ class PioDecoderTerminal implements vscode.Pseudoterminal {
       this.debug(
         `Suppressed duplicate crash #${this.suppressedCount}`
       )
+      this.scheduleSerialResume()
       this.updateState({
         statusMessage: `Crash loop detected — repeated crash suppressed (×${this.suppressedCount + 1})`,
         serialLines: [],
@@ -383,11 +403,29 @@ class PioDecoderTerminal implements vscode.Pseudoterminal {
     this.lastCrashTime = now
     this.suppressedCount = 0
     this.serialPaused = false
+    clearTimeout(this.serialResumeTimer)
 
     // Clear serial lines so decode result is visible
     this.debug(`Auto-decoding crash trace (${crashText.length} chars)`)
     this.state.serialLines = []
     this.handleInput(crashText)
+  }
+
+  /**
+   * After suppressing a duplicate crash, schedule a timer to resume serial
+   * display once the dedup window has passed without a new crash.
+   */
+  private scheduleSerialResume(): void {
+    clearTimeout(this.serialResumeTimer)
+    this.serialResumeTimer = setTimeout(() => {
+      if (this.serialPaused) {
+        this.debug('Dedup window expired — resuming serial display')
+        this.serialPaused = false
+        this.suppressedCount = 0
+        this.lastCrashSignature = undefined
+        this.updateState({ statusMessage: idle })
+      }
+    }, CRASH_DEDUP_WINDOW_MS)
   }
 
   private scheduleRedraw(): void {
